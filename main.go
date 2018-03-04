@@ -14,6 +14,14 @@ func main() {
 	// coms provides info/error logging, done signaling, and a WaitGroup.
 	c := coms.New(logrus.New())
 
+	// setup iptables
+	closeIptables, err := setupIptables()
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	defer closeIptables()
+
 	// Conc wraps a lambda in a go routine and handles WaitGroup accounting.
 	c.Conc(func() {
 		listen(c, 80, false)
