@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/codemodus/freenet/coms"
 )
@@ -31,6 +33,7 @@ func listen(cs *coms.Coms, port int, secure bool) {
 
 	go func() {
 		<-cs.Done()
+
 		qtClose(l)
 	}()
 
@@ -53,6 +56,7 @@ func spawn(cs *coms.Coms, l *net.TCPListener) {
 		cs.Infof("accepted connection on %s", c.RemoteAddr().String())
 
 		done := make(chan struct{})
+
 		go func() {
 			select {
 			case <-cs.Done():
@@ -69,18 +73,18 @@ func spawn(cs *coms.Coms, l *net.TCPListener) {
 		}
 
 		cs.Conc(func() {
-			intercept(cs, c)
-			close(done)
+			bond(cs, done, c)
+
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
 		})
 	}
 }
 
-var (
-	gup, gdn = 0, 0
-	cup, cdn = 0, 0
-)
-
-func intercept(cs *coms.Coms, conn *net.TCPConn) {
+func bond(cs *coms.Coms, done chan struct{}, conn *net.TCPConn) {
 	f, err := conn.File()
 	if err != nil {
 		cs.Errorf("cannot get conn file: %s", err)
@@ -88,79 +92,66 @@ func intercept(cs *coms.Coms, conn *net.TCPConn) {
 	}
 	defer qtClose(f)
 
-	fd := int(f.Fd())
-	/*c, err := net.FileConn(f)
-	if err != nil {
-		cs.Errorf("cannot get file conn: %s", err)
-		return
-	}
-	defer qtClose(c)*/
-
-	/*	cDone := make(chan struct{})
-		go func() {
-			select {
-			case <-cs.Done():
-			case <-cDone:
-			}
-			qtClose(c)
-		}()
-		defer func() { close(cDone) }()*/
-
-	a, err := syscall.GetsockoptIPv6Mreq(fd, syscall.SOL_IP, sockOptOrigDst)
+	a, err := address(f)
 	if err != nil {
 		cs.Errorf("cannot determine source address: %s", err)
 		return
 	}
-	as := multiaddrString(a.Multiaddr)
 
-	cl, err := net.Dial("tcp", as)
+	cl, err := net.DialTimeout("tcp", a, time.Second*16)
 	if err != nil {
-		cs.Errorf("cannot dial destination (%s): %s", as, err)
+		cs.Errorf("cannot dial destination (%s): %s", a, err)
+		close(done)
+		return
 	}
 	defer qtClose(cl)
-	cs.Infof("connected to remote at %s\n", as)
-
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-cs.Done():
-		case <-done:
-		}
-		qtClose(cl)
-	}()
-	defer func() { close(done) }()
+	cs.Infof("connected to remote at %s", a)
 
 	wg := &sync.WaitGroup{}
 	wg.Add(2)
 
 	go func() {
-		cup++
-		fmt.Println("cu", cup)
-		_, _ = io.Copy(cl, conn)
-		qtClose(cl)
-		wg.Done()
-		cdn++
-		fmt.Println("cd", cdn)
+		defer wg.Done()
+
+		if _, err := reqCopy(cl, conn); err != nil {
+			fmt.Println("copy err:", err)
+		}
 	}()
 
 	go func() {
-		gup++
-		fmt.Println("gu", gup)
-		_, _ = io.Copy(conn, cl)
-		qtClose(conn)
-		wg.Done()
-		gdn++
-		fmt.Println("gd", gdn)
+		defer wg.Done()
+
+		secure := splitPort(a) == "443"
+
+		_ = cl.SetReadDeadline(time.Now().Add(time.Second * 16))
+		if _, err := intercept(conn, cl, secure); err != nil {
+			fmt.Println("intercept", err)
+		}
 	}()
 
 	wg.Wait()
+}
+
+func reqCopy(dst io.Writer, src io.Reader) (int64, error) {
+	return io.Copy(dst, src)
 }
 
 func qtClose(c io.Closer) {
 	_ = c.Close()
 }
 
-func multiaddrString(multiaddr [16]byte) string {
+func address(f *os.File) (string, error) {
+	fd := int(f.Fd())
+
+	a, err := syscall.GetsockoptIPv6Mreq(fd, syscall.SOL_IP, sockOptOrigDst)
+	if err != nil {
+		return "", err
+	}
+
+	return multiaddrToString(a.Multiaddr), nil
+}
+
+func multiaddrToString(multiaddr [16]byte) string {
 	ip := multiaddr[4:8]
 	ipStr := net.IPv4(ip[0], ip[1], ip[2], ip[3]).String()
 
@@ -169,4 +160,14 @@ func multiaddrString(multiaddr [16]byte) string {
 	portStr := strconv.FormatInt(portUint, 10)
 
 	return (ipStr + ":" + portStr)
+}
+
+func splitPort(s string) string {
+	for i := len(s) - 1; i > 0; i-- {
+		if s[i] == ':' {
+			return s[i+1:]
+		}
+	}
+
+	return "443"
 }
