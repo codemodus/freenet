@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"sync"
 	"syscall"
 	"time"
 
@@ -17,7 +16,7 @@ const (
 	sockOptOrigDst = 80
 )
 
-func listen(cs *coms.Coms, port int, secure bool) {
+func listenTCP(cs *coms.Coms, port int, secure bool) {
 	a := &net.TCPAddr{
 		IP:   net.ParseIP("0.0.0.0"),
 		Port: port,
@@ -44,7 +43,7 @@ func listen(cs *coms.Coms, port int, secure bool) {
 
 func spawn(cs *coms.Coms, l *net.TCPListener) {
 	for {
-		c, err := l.AcceptTCP()
+		c, err := acceptTCP(l)
 		if err != nil {
 			select {
 			case <-cs.Done():
@@ -66,14 +65,10 @@ func spawn(cs *coms.Coms, l *net.TCPListener) {
 			qtClose(c)
 		}()
 
-		if err := c.SetLinger(10); err != nil {
-			cs.Errorf("cannot set conn linger: %s", err)
-			close(done)
-			continue
-		}
-
 		cs.Conc(func() {
-			bond(cs, done, c)
+			if err := bond(cs, done, c); err != nil {
+				cs.Errorf("bond broken: %s", err)
+			}
 
 			select {
 			case <-done:
@@ -84,56 +79,66 @@ func spawn(cs *coms.Coms, l *net.TCPListener) {
 	}
 }
 
-func bond(cs *coms.Coms, done chan struct{}, conn *net.TCPConn) {
+func bond(cs *coms.Coms, done chan struct{}, conn *net.TCPConn) error {
 	f, err := conn.File()
 	if err != nil {
-		cs.Errorf("cannot get conn file: %s", err)
-		return
+		return fmt.Errorf("cannot get conn file: %s", err)
 	}
 	defer qtClose(f)
 
 	a, err := address(f)
 	if err != nil {
-		cs.Errorf("cannot determine source address: %s", err)
-		return
+		return fmt.Errorf("cannot determine source address: %s", err)
 	}
 
-	cl, err := net.DialTimeout("tcp", a, time.Second*16)
+	cl, err := dial(a)
 	if err != nil {
-		cs.Errorf("cannot dial destination (%s): %s", a, err)
-		close(done)
-		return
+		return fmt.Errorf("cannot dial destination (%s): %s", a, err)
 	}
 	defer qtClose(cl)
 	cs.Infof("connected to remote at %s", a)
 
-	wg := &sync.WaitGroup{}
-	wg.Add(2)
+	ec := make(chan error)
+	defer close(ec)
 
 	go func() {
-		defer wg.Done()
-
-		if _, err := reqCopy(cl, conn); err != nil {
-			fmt.Println("copy err:", err)
-		}
+		_, _ = io.Copy(cl, conn)
+		ec <- nil
 	}()
 
-	go func() {
-		defer wg.Done()
+	_, err = intercept(conn, cl, isSecure(a))
+	if err != nil {
+		<-ec
+		return err
+	}
 
-		secure := splitPort(a) == "443"
-
-		_ = cl.SetReadDeadline(time.Now().Add(time.Second * 16))
-		if _, err := intercept(conn, cl, secure); err != nil {
-			fmt.Println("intercept", err)
-		}
-	}()
-
-	wg.Wait()
+	return <-ec
 }
 
-func reqCopy(dst io.Writer, src io.Reader) (int64, error) {
-	return io.Copy(dst, src)
+func acceptTCP(l *net.TCPListener) (*net.TCPConn, error) {
+	c, err := l.AcceptTCP()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.SetLinger(10); err != nil {
+		return nil, err
+	}
+
+	return c, nil
+}
+
+func dial(address string) (net.Conn, error) {
+	cl, err := net.DialTimeout("tcp", address, time.Second*16)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = cl.SetReadDeadline(time.Now().Add(time.Second * 16)); err != nil {
+		return nil, err
+	}
+
+	return cl, nil
 }
 
 func qtClose(c io.Closer) {
@@ -162,6 +167,10 @@ func multiaddrToString(multiaddr [16]byte) string {
 	return (ipStr + ":" + portStr)
 }
 
+func isSecure(s string) bool {
+	return splitPort(s) == "443"
+}
+
 func splitPort(s string) string {
 	for i := len(s) - 1; i > 0; i-- {
 		if s[i] == ':' {
@@ -169,5 +178,5 @@ func splitPort(s string) string {
 		}
 	}
 
-	return "443"
+	return "0"
 }

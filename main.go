@@ -24,10 +24,10 @@ func main() {
 
 	// Conc wraps a lambda in a go routine and handles WaitGroup accounting.
 	c.Conc(func() {
-		listen(c, 80, false)
+		listenTCP(c, 80, false)
 	})
 	c.Conc(func() {
-		listen(c, 443, true)
+		listenTCP(c, 443, true)
 	})
 
 	// Setup system signal behavior (die on all sigs).
