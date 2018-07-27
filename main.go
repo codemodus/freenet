@@ -9,7 +9,7 @@ import (
 func main() {
 	// Wire into and ignore common system signals.
 	sm := sigmon.New(nil)
-	sm.Run()
+	sm.Start()
 
 	// coms provides info/error logging, done signaling, and a WaitGroup.
 	c := coms.New(logrus.New())
@@ -31,7 +31,7 @@ func main() {
 	})
 
 	// Setup system signal behavior (die on all sigs).
-	sm.Set(func(s *sigmon.SignalMonitor) {
+	sm.Set(func(s *sigmon.State) {
 		c.Info("goodbye")
 		c.Close()
 	})
