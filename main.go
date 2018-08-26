@@ -2,7 +2,7 @@ package main
 
 import (
 	"github.com/codemodus/freenet/coms"
-	"github.com/codemodus/sigmon"
+	"github.com/codemodus/sigmon/v2"
 	"github.com/sirupsen/logrus"
 )
 
